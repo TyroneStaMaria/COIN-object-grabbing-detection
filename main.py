@@ -1,6 +1,9 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+import socket
+import torch
+
 
 # Initialize MediaPipe Hand solution
 mp_hands = mp.solutions.hands
@@ -10,7 +13,48 @@ hands = mp_hands.Hands(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 )
+
+
 mp_drawing = mp.solutions.drawing_utils
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+serverAddressPort = ("127.0.0.1", 5052)
+
+model = torch.hub.load("ultralytics/yolov5", "yolov5s", pretrained=True)
+
+
+def detect_objects_yolo(frame, hand_landmarks):
+    # Convert BGR to RGB
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Resize and normalize image for YOLOv5
+    results = model(frame_rgb)
+
+    # Process results
+    detections = results.pandas().xyxy[0]  # DataFrame of detections
+    for i, det in detections.iterrows():
+        xmin, ymin, xmax, ymax = (
+            int(det["xmin"]),
+            int(det["ymin"]),
+            int(det["xmax"]),
+            int(det["ymax"]),
+        )
+        cv2.rectangle(
+            frame, (xmin, ymin), (xmax, ymax), (255, 0, 0), 2
+        )  # Draw rectangle around detected objects
+
+        if hand_landmarks and is_grabbing(hand_landmarks, (xmin, ymin, xmax, ymax)):
+            action_text = "Grab Detected!"
+            cv2.putText(
+                frame,
+                action_text,
+                (50, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255),
+                3,
+            )
+
+    return frame, detections
 
 
 def detect_hand(frame):
@@ -28,6 +72,7 @@ def detect_hand(frame):
                 # Convert landmark position to relative pixel positions
                 x, y = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
                 hand_landmarks.append((x, y))
+
     return frame, hand_landmarks
 
 
@@ -39,11 +84,13 @@ def is_grabbing(hand_landmarks, bbox):
         16,
         20,
     ]  # Indices for fingertips in MediaPipe hand landmarks
-    grab_threshold = 50  # Define a threshold for proximity to the object
+    grab_threshold = 300  # Define a threshold for proximity to the object
 
     # Calculate the center of the bounding box of the object
     x, y, w, h = bbox
-    object_center = (x + w // 2, y + h // 2)
+    object_center = ((x + w) // 2, (y + h) // 2)
+
+    cv2.rectangle(frame, object_center, object_center, (0, 255, 0), 100)
 
     # Count how many fingertips are close to the object
     close_fingertips = 0
@@ -53,6 +100,7 @@ def is_grabbing(hand_landmarks, bbox):
             (fingertip_pos[0] - object_center[0]) ** 2
             + (fingertip_pos[1] - object_center[1]) ** 2
         )
+        print(distance)
         if distance < grab_threshold:
             close_fingertips += 1
 
@@ -60,58 +108,8 @@ def is_grabbing(hand_landmarks, bbox):
     return close_fingertips >= 3
 
 
-def detect_cube_like_objects(frame, hand_landmarks):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 50, 150)
-
-    contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    action_detected = False
-    action_text = ""
-
-    for cnt in contours:
-        epsilon = 0.04 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-
-        if len(approx) == 4 and cv2.contourArea(cnt) > 400:  # Detect cube-like objects
-            x, y, w, h = cv2.boundingRect(approx)
-            cv2.drawContours(frame, [approx], 0, (0, 255, 0), 5)
-
-            # Check for grabbing
-            if hand_landmarks and is_grabbing(hand_landmarks, (x, y, w, h)):
-                action_detected = True
-                action_text = "Grab Detected!"
-                cv2.putText(
-                    frame,
-                    action_text,
-                    (50, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    3,
-                )
-
-            # Check if any hand landmark is inside the object's bounding box
-            elif hand_landmarks:
-                for point in hand_landmarks:
-                    if x < point[0] < x + w and y < point[1] < y + h:
-                        action_detected = True
-                        action_text = "Touch Detected!"
-                        cv2.putText(
-                            frame,
-                            action_text,
-                            (50, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            (0, 0, 255),
-                            3,
-                        )
-                        break
-
-    return frame, action_detected
-
-
 cap = cv2.VideoCapture(1)
+
 
 while True:
     ret, frame = cap.read()
@@ -119,7 +117,12 @@ while True:
         break
 
     frame, hand_landmarks = detect_hand(frame)
-    frame, touch_detected = detect_cube_like_objects(frame, hand_landmarks)
+    frame, detections = detect_objects_yolo(
+        frame, hand_landmarks
+    )  # Replace or combine with your cube detection logic
+
+    # if hand_landmarks and not detections.empty:
+    #     detect_grabbing(frame, detections, hand_landmarks)
 
     cv2.imshow("Frame", frame)
     if cv2.waitKey(1) & 0xFF == ord("q"):
